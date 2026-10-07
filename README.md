@@ -12,6 +12,7 @@ material for lessons on **infrastructure provisioning, containers, CI/CD and clo
 ## Quick start
 
 ```bash
+git clone https://github.com/vvvgtmp-lgtm/cryptofolio.git && cd cryptofolio
 cp .env.example .env
 docker compose up -d --build        # or: make up
 ```
