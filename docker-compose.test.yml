@@ -1,0 +1,78 @@
+# Throwaway infrastructure for integration tests (ports offset by 50000 to avoid clashes).
+name: cryptofolio-test
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cryptofolio
+      POSTGRES_PASSWORD: cryptofolio
+      POSTGRES_DB: cryptofolio_test
+    ports: ["55432:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cryptofolio -d cryptofolio_test"]
+      interval: 2s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports: ["56379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+
+  minio:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: cryptofolio
+      MINIO_ROOT_PASSWORD: cryptofolio-secret
+    ports: ["59000:9000"]
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      retries: 30
+
+  minio-init:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mc alias set local http://minio:9000 cryptofolio cryptofolio-secret
+        for b in cf-avatars cf-imports cf-exports; do mc mb --ignore-existing local/$$b; done
+
+  migrate:
+    build: { context: ./services/api, target: runtime }
+    command: ["node", "dist/db/migrate.js"]
+    environment:
+      DATABASE_URL: postgres://cryptofolio:cryptofolio@postgres:5432/cryptofolio_test
+      SEED_DEMO_DATA: "false"
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  # ---- test runners (built from each service's `test` stage) ----
+  price-service-test:
+    build: { context: ./services/price-service, target: test }
+
+  api-test:
+    build: { context: ./services/api, target: test }
+    environment:
+      DATABASE_URL: postgres://cryptofolio:cryptofolio@postgres:5432/cryptofolio_test
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+
+  worker-test:
+    build: { context: ./services/worker, target: test }
+    environment:
+      INTEGRATION: "1"
+      DATABASE_URL: postgres://cryptofolio:cryptofolio@postgres:5432/cryptofolio_test
+      REDIS_URL: redis://redis:6379/1
+      S3_ENDPOINT: http://minio:9000
+
+  frontend-test:
+    build: { context: ./services/frontend, target: test }

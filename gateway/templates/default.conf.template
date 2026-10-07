@@ -1,0 +1,68 @@
+# Rendered at container start by the nginx image (envsubst replaces ${S3_BUCKET_*} only).
+# Everything below lives in the http {} context.
+
+log_format gateway_json escape=json
+  '{"ts":"$time_iso8601","service":"gateway","request_id":"$req_id",'
+  '"remote":"$remote_addr","method":"$request_method","uri":"$request_uri",'
+  '"status":$status,"bytes":$body_bytes_sent,"duration":$request_time,'
+  '"upstream":"$upstream_addr","upstream_duration":"$upstream_response_time"}';
+
+# Reuse the caller's X-Request-ID or mint one; it is passed to every upstream.
+map $http_x_request_id $req_id {
+  default $http_x_request_id;
+  ""      $request_id;
+}
+
+# Docker's embedded DNS: re-resolve upstreams so restarted containers are found.
+resolver 127.0.0.11 valid=10s ipv6=off;
+
+server {
+  listen 8080;
+  server_name _;
+  access_log /dev/stdout gateway_json;
+  client_max_body_size 10m;
+
+  gzip on;
+  gzip_min_length 1024;
+  gzip_types application/json application/javascript text/css image/svg+xml;
+
+  add_header X-Request-ID $req_id always;
+
+  # NOTE: proxy_set_header is NOT inherited by a location that sets its own,
+  # so all headers are set once here and never inside a location.
+  proxy_http_version 1.1;
+  proxy_set_header Connection "";
+  proxy_set_header Host $http_host;
+  proxy_set_header X-Request-ID $req_id;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+
+  location = /gateway/healthz {
+    access_log off;
+    return 200 "ok\n";
+  }
+
+  location /api/ {
+    set $api_upstream http://api:3000;
+    proxy_pass $api_upstream;
+  }
+
+  # Presigned object-storage URLs. Path and Host must reach MinIO untouched:
+  # both are part of the SigV4 signature.
+  location ~ ^/(${S3_BUCKET_AVATARS}|${S3_BUCKET_IMPORTS}|${S3_BUCKET_EXPORTS})/ {
+    set $storage_upstream http://minio:9000;
+    # Uploaded files are served from the app's origin: never let them run as a page.
+    # (add_header here replaces the server-level ones, so X-Request-ID is repeated.)
+    add_header Content-Security-Policy "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Request-ID $req_id always;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_pass $storage_upstream;
+  }
+
+  location / {
+    set $frontend_upstream http://frontend:8080;
+    proxy_pass $frontend_upstream;
+  }
+}
